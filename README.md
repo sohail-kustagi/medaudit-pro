@@ -41,30 +41,30 @@ MedAudit PRO provides everyday individuals with the clinical precision and legal
 
 ```mermaid
 graph TD
-    User([Patient / User]) -->|1. Drag & Drop PDF Bill| Frontend[React + Vite + Tailwind Console]
-    Frontend -->|2. Request Presigned URL| API[FastAPI Backend / API Gateway]
-    API -.->|Returns S3 Upload URL| Frontend
-    Frontend -->|3. Direct Secure Upload| S3[(Amazon S3 Bills Bucket)]
+    User(["Patient / User"]) -->|"1. Drag & Drop PDF Bill"| Frontend["React + Vite + Tailwind Console"]
+    Frontend -->|"2. Request Presigned URL"| API["FastAPI Backend / API Gateway"]
+    API -.->|"Returns S3 Upload URL"| Frontend
+    Frontend -->|"3. Direct Secure Upload"| S3[("Amazon S3 Bills Bucket")]
     
-    S3 -->|4. S3 ObjectCreated Event| Dispatcher[AWS Lambda Dispatcher]
+    S3 -->|"4. S3 ObjectCreated Event"| Dispatcher["AWS Lambda Dispatcher"]
     
     subgraph Data Enrichment Pipeline
-        Dispatcher -->|5. OCR & Table Extraction| Textract[Amazon Textract]
-        Dispatcher -->|6. Cross-reference CPT & Policy| RDS[(Amazon RDS PostgreSQL / CMS PFS)]
+        Dispatcher -->|"5. OCR & Table Extraction"| Textract["Amazon Textract"]
+        Dispatcher -->|"6. Cross-reference CPT & Policy"| RDS[("Amazon RDS PostgreSQL / CMS PFS")]
     end
 
     subgraph Autonomous Strands Agent Loop
-        Dispatcher -->|7. Enriched Bill JSON| Orchestrator[Strands Agents SDK Orchestrator]
-        Orchestrator <-->|Reasoning & Think Protocol| Bedrock[Amazon Bedrock / Bedrock Mantle]
+        Dispatcher -->|"7. Enriched Bill JSON"| Orchestrator["Strands Agents SDK Orchestrator"]
+        Orchestrator <-->|"Reasoning & Think Protocol"| Bedrock["Amazon Bedrock / Bedrock Mantle"]
         
-        Orchestrator -->|@tool query_policy_rules| Tool1[Policy & In-Network Coverage Checker]
-        Orchestrator -->|@tool check_unbundling| Tool2[CMS NCCI Bundling Edits Checker]
-        Orchestrator -->|@tool draft_appeal_letter| Tool3[Legal Appeal Letter Generator]
+        Orchestrator -->|"Tool: query_policy_rules"| Tool1["Policy & In-Network Coverage Checker"]
+        Orchestrator -->|"Tool: check_unbundling"| Tool2["CMS NCCI Bundling Edits Checker"]
+        Orchestrator -->|"Tool: draft_appeal_letter"| Tool3["Legal Appeal Letter Generator"]
     end
 
-    Orchestrator -->|8. AgentDecision JSON| RDS
-    Dispatcher -->|9. Push Event / Audit Ready| Frontend
-    Frontend -->|10. Human-in-the-Loop Action Modal| User
+    Orchestrator -->|"8. AgentDecision JSON"| RDS
+    Dispatcher -->|"9. Push Event / Audit Ready"| Frontend
+    Frontend -->|"10. Human-in-the-Loop Action Modal"| User
 ```
 
 ### The Strands Agents Implementation
