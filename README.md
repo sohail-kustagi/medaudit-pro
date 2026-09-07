@@ -35,7 +35,7 @@ graph TD
     
     S3 -->|S3 Event Trigger| Lambda[AWS Lambda Agent Dispatcher]
     
-    subgraph Autonomous Agent Pipeline (LLM Repo)
+    subgraph Autonomous Agent Pipeline
         Lambda -->|1. Extract| Textract[AWS Textract]
         Lambda -->|2. Analyze| DB[(PostgreSQL RDS)]
         Lambda -->|3. Audit & Draft| Bedrock[Amazon Bedrock / LLM]
