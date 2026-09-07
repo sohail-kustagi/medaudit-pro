@@ -1,0 +1,9 @@
+[submodule "backend"]
+	path = backend
+	url = https://github.com/sohail-kustagi/medaudit-backend.git
+[submodule "agent"]
+	path = agent
+	url = https://github.com/sohail-kustagi/medaudit-LLM.git
+[submodule "frontend"]
+	path = frontend
+	url = https://github.com/stackswift/medaudit-frontend.git

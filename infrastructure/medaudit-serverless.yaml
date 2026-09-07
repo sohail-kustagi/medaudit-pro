@@ -1,0 +1,436 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  MedAudit - Serverless Backend & LLM Microservice
+  (Lambda + API Gateway + RDS PostgreSQL t3.micro)
+  Budget-optimised for $50 AWS credit.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Parameters
+# ─────────────────────────────────────────────────────────────────────────────
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: 'dev'
+    AllowedValues: [dev, prod]
+
+  AwsAccessKeyId:
+    Type: String
+    NoEcho: true
+    Description: 'IAM user access key from prerequisites stack'
+
+  AwsSecretAccessKey:
+    Type: String
+    NoEcho: true
+    Description: 'IAM user secret key from prerequisites stack'
+
+  AwsBearerTokenBedrock:
+    Type: String
+    NoEcho: true
+    Description: 'Bedrock Mantle bearer token (AWS_BEARER_TOKEN_BEDROCK from .env)'
+
+  CognitoUserPoolId:
+    Type: String
+
+  CognitoClientId:
+    Type: String
+
+  S3BucketName:
+    Type: String
+
+  DbPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 12
+    Description: 'Master password for the RDS PostgreSQL instance (you choose this)'
+
+  FrontendOriginUrl:
+    Type: String
+    Default: 'https://medaudit-frontend.vercel.app'
+    Description: 'Vercel frontend URL for CORS'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Globals – applied to all Lambda functions
+# ─────────────────────────────────────────────────────────────────────────────
+Globals:
+  Function:
+    Timeout: 300             # 5 minutes - gives Bedrock Mantle agent time to respond
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref EnvironmentName
+        DEBUG: 'false'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Resources
+# ─────────────────────────────────────────────────────────────────────────────
+Resources:
+
+  # ───────────────────────────────────────
+  # VPC - minimal 2-AZ setup for RDS
+  # ───────────────────────────────────────
+  MedAuditVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: '10.0.0.0/16'
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'medaudit-vpc-${EnvironmentName}'
+
+  # Public subnets - Lambda needs outbound internet (Bedrock/Textract/S3)
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MedAuditVPC
+      CidrBlock: '10.0.1.0/24'
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'medaudit-public-1-${EnvironmentName}'
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MedAuditVPC
+      CidrBlock: '10.0.2.0/24'
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'medaudit-public-2-${EnvironmentName}'
+
+  # Private subnets - RDS lives here, not publicly routable
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MedAuditVPC
+      CidrBlock: '10.0.3.0/24'
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub 'medaudit-private-1-${EnvironmentName}'
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MedAuditVPC
+      CidrBlock: '10.0.4.0/24'
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub 'medaudit-private-2-${EnvironmentName}'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MedAuditVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MedAuditVPC
+
+  PublicInternetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # NAT Gateway - lets Lambda in public subnets reach internet while RDS stays private
+  # Cost: ~$1/month (cheapest NAT option). Required for Bedrock/Textract API calls.
+  NatEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MedAuditVPC
+
+  PrivateNatRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnet1RTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # Security Group: Lambda functions
+  LambdaSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'MedAudit Lambda - outbound to internet and RDS'
+      VpcId: !Ref MedAuditVPC
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: '0.0.0.0/0'
+
+  # Security Group: RDS - only accessible from Lambda SG
+  RDSSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'MedAudit RDS - inbound PostgreSQL from Lambda only'
+      VpcId: !Ref MedAuditVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref LambdaSG
+
+  # ───────────────────────────────────────
+  # RDS PostgreSQL t3.micro
+  # Cost: ~$0 (Free Tier: 750 hrs/month for 12 months) or ~$13/month
+  # ───────────────────────────────────────
+  MedAuditDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: 'MedAudit RDS subnet group (private subnets)'
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  MedAuditDB:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub 'medaudit-db-${EnvironmentName}'
+      DBInstanceClass: db.t3.micro        # Free Tier eligible; ~$13/mo otherwise
+      Engine: postgres
+      EngineVersion: '15.7'
+      DBName: medaudit
+      MasterUsername: medaudit_admin
+      MasterUserPassword: !Ref DbPassword
+      AllocatedStorage: '20'             # 20 GB - Free Tier includes 20 GB
+      StorageType: gp2
+      StorageEncrypted: true
+      PubliclyAccessible: false
+      DBSubnetGroupName: !Ref MedAuditDBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSG
+      BackupRetentionPeriod: 3
+      MultiAZ: false                     # Single-AZ saves ~50% vs Multi-AZ
+      DeletionProtection: false
+      EnablePerformanceInsights: false
+
+  # ───────────────────────────────────────
+  # ECR Repositories
+
+  # ───────────────────────────────────────
+  # IAM Role for Lambda Execution
+  # ───────────────────────────────────────
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'medaudit-lambda-role-${EnvironmentName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Allows Lambda to create ENIs for VPC access and write CloudWatch logs
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: MedAuditLambdaAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: S3Access
+                Effect: Allow
+                Action: [s3:PutObject, s3:GetObject, s3:DeleteObject, s3:ListBucket]
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3BucketName}'
+                  - !Sub 'arn:aws:s3:::${S3BucketName}/*'
+              - Sid: TextractAccess
+                Effect: Allow
+                Action:
+                  - textract:StartDocumentAnalysis
+                  - textract:GetDocumentAnalysis
+                  - textract:DetectDocumentText
+                  - textract:AnalyzeDocument
+                Resource: '*'
+              - Sid: BedrockAccess
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: '*'
+              - Sid: CognitoAccess
+                Effect: Allow
+                Action: [cognito-idp:GetUser, cognito-idp:DescribeUserPool]
+                Resource: '*'
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: 'arn:aws:logs:*:*:*'
+
+  # ───────────────────────────────────────
+  # LLM Microservice: Lambda + API Gateway
+  # ───────────────────────────────────────
+  # Runs in PRIVATE subnets (reaches internet via NAT → Bedrock Mantle)
+  MedAuditLLMApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref EnvironmentName
+      Description: 'MedAudit LLM Microservice - internal Strands/Bedrock agent endpoint'
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref FrontendOriginUrl
+          - 'http://localhost:3000'
+        AllowHeaders: ['*']
+        AllowMethods: [GET, POST, OPTIONS]
+
+  MedAuditLLMFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'medaudit-llm-${EnvironmentName}'
+      PackageType: Image
+      ImageUri: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/medaudit-llm-${EnvironmentName}:latest'
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: 1024    # strands-agents needs RAM for model loading
+      Timeout: 300        # 5 min - Bedrock Mantle agent can take 60-120s
+      # VPC: private subnet so it can reach RDS if needed, NAT for internet
+      VpcConfig:
+        SecurityGroupIds: [!Ref LambdaSG]
+        SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      Environment:
+        Variables:
+          AWS_BEARER_TOKEN_BEDROCK: !Ref AwsBearerTokenBedrock
+          BEDROCK_MODEL_ID: 'openai.gpt-oss-120b'
+      Events:
+        LLMProxy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MedAuditLLMApi
+            Path: /{proxy+}
+            Method: ANY
+        LLMRoot:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MedAuditLLMApi
+            Path: /
+            Method: ANY
+
+  # ───────────────────────────────────────
+  # Backend API: Lambda + API Gateway
+  # ───────────────────────────────────────
+  MedAuditBackendApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref EnvironmentName
+      Description: 'MedAudit Backend API - exposed to Vercel frontend'
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowHeaders: ['*']
+        AllowMethods: [GET, POST, PUT, DELETE, OPTIONS]
+
+  MedAuditBackendFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'medaudit-backend-${EnvironmentName}'
+      PackageType: Image
+      ImageUri: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/medaudit-backend-${EnvironmentName}:latest'
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: 512
+      Timeout: 120        # 2 min - API responses should be fast; pipeline is background
+      VpcConfig:
+        SecurityGroupIds: [!Ref LambdaSG]
+        SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      Environment:
+        Variables:
+          AWS_BEARER_TOKEN_BEDROCK: !Ref AwsBearerTokenBedrock
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          S3_BUCKET_NAME: !Ref S3BucketName
+          ALLOW_MOCK_AUTH: 'true'
+          BACKEND_CORS_ORIGINS: '["*"]'
+          DATABASE_URL: !Sub
+            - 'postgresql+asyncpg://medaudit_admin:${DbPassword}@${DbHost}:5432/medaudit'
+            - DbHost: !GetAtt MedAuditDB.Endpoint.Address
+          LLM_MICROSERVICE_URL: !Sub
+            - 'https://${LLMApiId}.execute-api.${AWS::Region}.amazonaws.com/${Env}/api/v1/audit'
+            - LLMApiId: !Ref MedAuditLLMApi
+              Env: !Ref EnvironmentName
+      Events:
+        BackendProxy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MedAuditBackendApi
+            Path: /{proxy+}
+            Method: ANY
+        BackendRoot:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MedAuditBackendApi
+            Path: /
+            Method: ANY
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Outputs
+# ─────────────────────────────────────────────────────────────────────────────
+Outputs:
+  BackendApiUrl:
+    Description: 'Backend API URL - set as VITE_API_URL in Vercel project settings'
+    Value: !Sub 'https://${MedAuditBackendApi}.execute-api.${AWS::Region}.amazonaws.com/${EnvironmentName}'
+
+  LLMApiUrl:
+    Description: 'LLM Microservice URL (internal only - called by backend Lambda)'
+    Value: !Sub 'https://${MedAuditLLMApi}.execute-api.${AWS::Region}.amazonaws.com/${EnvironmentName}'
+
+  DatabaseEndpoint:
+    Description: 'RDS PostgreSQL endpoint - needed for Alembic migrations'
+    Value: !GetAtt MedAuditDB.Endpoint.Address
+
+  DatabasePort:
+    Description: 'RDS PostgreSQL port'
+    Value: !GetAtt MedAuditDB.Endpoint.Port
+
+  BackendECRRepoUri:
+    Description: 'ECR URI for backend image'
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/medaudit-backend-${EnvironmentName}'
+
+  LLMECRRepoUri:
+    Description: 'ECR URI for LLM image'
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/medaudit-llm-${EnvironmentName}'

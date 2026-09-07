@@ -1,0 +1,182 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'MedAudit - Complete AWS Prerequisites Stack (S3, Cognito, IAM Policy & User)'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: 'dev'
+    Description: 'Deployment environment identifier (e.g., dev, prod, staging)'
+
+  FrontendOriginUrl:
+    Type: String
+    Default: 'http://localhost:3000'
+    Description: 'Allowed origin for S3 direct browser upload CORS (e.g., http://localhost:3000)'
+
+Resources:
+  # ----------------------------------------------------------------------------
+  # 1. Amazon S3 Storage Bucket for Medical Bills and Reports
+  # ----------------------------------------------------------------------------
+  MedicalBillsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'medaudit-bills-${AWS::AccountId}-${AWS::Region}-${EnvironmentName}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+              - HEAD
+            AllowedOrigins:
+              - !Ref FrontendOriginUrl
+              - 'http://127.0.0.1:3000'
+              - 'http://localhost:8000'
+            ExposedHeaders:
+              - ETag
+              - x-amz-meta-original-filename
+              - x-amz-meta-user-id
+              - x-amz-meta-document-id
+            MaxAge: 3600
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # ----------------------------------------------------------------------------
+  # 2. Amazon Cognito User Pool & App Client
+  # ----------------------------------------------------------------------------
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub 'medaudit-users-${EnvironmentName}'
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: true
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub 'medaudit-web-client-${EnvironmentName}'
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+
+  # ----------------------------------------------------------------------------
+  # 3. IAM User & Policy for Backend Agent & Services
+  # ----------------------------------------------------------------------------
+  BackendIAMUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Sub 'medaudit-backend-agent-${EnvironmentName}'
+
+  BackendIAMPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub 'medaudit-backend-policy-${EnvironmentName}'
+      Users:
+        - !Ref BackendIAMUser
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # S3 Permissions
+          - Sid: S3BucketAccess
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetBucketLocation
+              - s3:GetBucketCors
+            Resource: !GetAtt MedicalBillsBucket.Arn
+          - Sid: S3ObjectAccess
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+            Resource: !Sub '${MedicalBillsBucket.Arn}/*'
+
+          # Amazon Textract Permissions
+          - Sid: TextractAccess
+            Effect: Allow
+            Action:
+              - textract:StartDocumentAnalysis
+              - textract:GetDocumentAnalysis
+              - textract:DetectDocumentText
+              - textract:AnalyzeDocument
+            Resource: '*'
+
+          # Amazon Bedrock Permissions
+          - Sid: BedrockAccess
+            Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+            Resource: '*'
+
+          # Amazon SES Permissions
+          - Sid: SESAccess
+            Effect: Allow
+            Action:
+              - ses:SendEmail
+              - ses:SendRawEmail
+            Resource: '*'
+
+          # Cognito Permissions
+          - Sid: CognitoReadAccess
+            Effect: Allow
+            Action:
+              - cognito-idp:GetUser
+              - cognito-idp:DescribeUserPool
+            Resource: !GetAtt CognitoUserPool.Arn
+
+  BackendAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref BackendIAMUser
+
+Outputs:
+  AWSRegion:
+    Description: 'AWS_REGION'
+    Value: !Ref AWS::Region
+
+  S3BucketName:
+    Description: 'S3_BUCKET_NAME for medical bills'
+    Value: !Ref MedicalBillsBucket
+
+  CognitoUserPoolId:
+    Description: 'COGNITO_USER_POOL_ID'
+    Value: !Ref CognitoUserPool
+
+  CognitoClientId:
+    Description: 'COGNITO_CLIENT_ID'
+    Value: !Ref CognitoUserPoolClient
+
+  BackendAccessKeyId:
+    Description: 'AWS_ACCESS_KEY_ID'
+    Value: !Ref BackendAccessKey
+
+  BackendSecretAccessKey:
+    Description: 'AWS_SECRET_ACCESS_KEY'
+    Value: !GetAtt BackendAccessKey.SecretAccessKey
