@@ -11,10 +11,12 @@
 
 ## 🚀 Live Demo & Video Submission
 
+- **Demo & Pitch Video:** [Watch on YouTube (3:40)](https://youtu.be/BkWUD6-_U1o)
 - **Live Web Console:** [https://medaudit-frontend-seven.vercel.app](https://medaudit-frontend-seven.vercel.app)  
   *(Mock authentication is enabled by default: judges can test uploading and reviewing sample medical bills immediately with zero login friction).*
-- **Demo & Pitch Video:** [Watch on YouTube / Vimeo](https://agentsforhumans.devpost.com) *(Max 5 mins)*
 - **Track:** **Everyday Agents**
+
+[![Watch the Demo Video](https://img.youtube.com/vi/BkWUD6-_U1o/maxresdefault.jpg)](https://youtu.be/BkWUD6-_U1o)
 
 ---
 
